@@ -1,0 +1,37 @@
+# Environments
+.env
+.env.*
+!.env.example
+
+# Node / Vite
+node_modules/
+dist/
+build/
+.npm/
+
+# Python / FastAPI
+.venv/
+venv/
+env/
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.pytest_cache/
+.coverage
+htmlcov/
+
+# Databases
+*.sqlite3
+*.db
+!backend_new/gdb_demo.db
+
+# OS / IDE
+.DS_Store
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# Logs
+*.log

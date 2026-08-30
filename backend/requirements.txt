@@ -1,0 +1,5 @@
+# Global Digital Bank — Python Backend Dependencies
+flask==3.0.3
+flask-cors==4.0.1
+flask-session==0.8.0
+bcrypt==4.1.3

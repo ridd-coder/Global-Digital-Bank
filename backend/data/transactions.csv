@@ -1,0 +1,4 @@
+transaction_id,account_number,operation,amount,balance_after,timestamp,note
+487F8D54,1001,create,5000.0,5000.0,2026-08-29T22:38:52.123678,Account created — Savings
+3E21C93F,1002,create,2000.0,2000.0,2026-08-29T22:49:43.144388,Account created — Savings
+DCD9CAA4,1003,create,5000.0,5000.0,2026-08-29T23:08:46.221737,Account created — Savings

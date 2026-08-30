@@ -1,0 +1,38 @@
+# Global Digital Bank — FastAPI Backend Dependencies
+
+# Core framework
+fastapi==0.115.0
+uvicorn[standard]==0.30.6
+
+# Database
+sqlalchemy==2.0.36
+psycopg2-binary==2.9.10
+alembic==1.14.0
+
+# Auth & Security
+python-jose[cryptography]==3.3.0
+passlib[bcrypt]==1.7.4
+bcrypt==4.2.0
+python-multipart==0.0.20
+
+# Config
+pydantic==2.10.3
+pydantic-settings==2.7.0
+
+# HTTP
+httpx==0.28.1
+
+# ML / Fraud Detection
+scikit-learn==1.6.0
+numpy==2.2.0
+joblib==1.4.2
+
+# PDF generation
+reportlab==4.2.5
+
+# Rate limiting
+slowapi==0.1.9
+
+# Utilities
+python-dateutil==2.9.0
+pytz==2024.2

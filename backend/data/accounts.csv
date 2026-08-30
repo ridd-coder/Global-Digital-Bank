@@ -1,0 +1,4 @@
+account_number,name,age,account_type,balance,pin_hash,status,is_locked,failed_login_attempts,daily_withdrawn,last_withdrawal_date,created_at
+1001,Test User,25,Savings,5000.0,$2b$12$89elp2vF6MJmkDrx6.k0He04hvQ03yL1VZe8zh0jkl4FKkWM4.RPC,active,0,0,0.0,2026-08-29,2026-08-29T22:38:52.121779
+1002,Test User Two,30,Savings,2000.0,$2b$12$4qQYswoXbuh80ntIz0slHeKGZpAGmt1gMVvcZIewgmSnYpOpDKobq,active,0,0,0.0,2026-08-29,2026-08-29T22:49:43.142304
+1003,Test User Three,25,Savings,5000.0,$2b$12$eFUxVcxWYq2s9.i..SYaM.7LWnA1tK3Lsi6TCvDfVWDs3G3u9UxEO,active,0,0,0.0,2026-08-29,2026-08-29T23:08:46.219335
