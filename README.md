@@ -128,7 +128,7 @@ cd Global-Digital-Bank-
 
 ### 2. Backend Setup (FastAPI)
 ```bash
-cd backend_new
+cd backend
 
 # Create virtual environment
 python -m venv venv
@@ -175,3 +175,19 @@ The database comes pre-seeded with realistic data so you can immediately explore
 
 ## 📄 License
 This project is built for educational and portfolio demonstration purposes. It is not intended for use in actual financial production environments.
+
+---
+
+## 📸 Screenshots
+
+### Landing Page
+![Landing Page](./docs/landing.png)
+*A modern, premium digital banking storefront designed to attract customers.*
+
+### Secure Login
+![Login Page](./docs/login.png)
+*Bank-grade authentication portal featuring demo credentials for easy exploration.*
+
+### Customer Dashboard
+![Dashboard](./docs/dashboard.png)
+*A comprehensive overview of finances, AI-secured cards, and actionable insights.*

@@ -1,35 +1,63 @@
 """
-Global Digital Bank - Configuration
+Global Digital Bank — Application Configuration
+Uses pydantic-settings for type-safe env variable loading.
 """
+from typing import List
+from pydantic import field_validator
+from pydantic_settings import BaseSettings, SettingsConfigDict
 
-import os
 
-# ─── Banking Rules ────────────────────────────────────────────────────────────
-MIN_AGE = 18
-MIN_BALANCE_SAVINGS = 1000.0
-MIN_BALANCE_CURRENT = 5000.0
-DAILY_WITHDRAWAL_LIMIT = 50000.0
-MAX_FAILED_ATTEMPTS = 3
-INTEREST_RATE_DEFAULT = 4.0  # percent per annum
+class Settings(BaseSettings):
+    model_config = SettingsConfigDict(
+        env_file=".env",
+        env_file_encoding="utf-8",
+        case_sensitive=False,
+    )
 
-ACCOUNT_TYPES = ["Savings", "Current"]
+    # ── Database ───────────────────────────────────────────────────────────────
+    DATABASE_URL: str = "sqlite:///./gdb_demo.db"
 
-# ─── Admin Credentials ────────────────────────────────────────────────────────
-ADMIN_USERNAME = "admin"
-ADMIN_PASSWORD = "admin123"   # Will be hashed at runtime in AdminAuthService
+    # ── JWT ────────────────────────────────────────────────────────────────────
+    SECRET_KEY: str = "dev-secret-key-change-in-production"
+    ALGORITHM: str = "HS256"
+    ACCESS_TOKEN_EXPIRE_MINUTES: int = 60
+    REFRESH_TOKEN_EXPIRE_DAYS: int = 7
 
-# ─── File Paths ───────────────────────────────────────────────────────────────
-BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-DATA_DIR = os.path.join(BASE_DIR, "data")
-ACCOUNTS_FILE = os.path.join(DATA_DIR, "accounts.csv")
-TRANSACTIONS_FILE = os.path.join(DATA_DIR, "transactions.csv")
-BACKUP_DIR = os.path.join(DATA_DIR, "backups")
-COUNTER_FILE = os.path.join(DATA_DIR, "counter.txt")
-SESSION_DIR = os.path.join(BASE_DIR, "flask_session")
+    # ── Admin Credentials ──────────────────────────────────────────────────────
+    ADMIN_EMAIL: str = "admin@globaldigitalbank.com"
+    ADMIN_PASSWORD: str = "Admin@SecurePass1"
 
-# ─── Flask ────────────────────────────────────────────────────────────────────
-SECRET_KEY = "gdb-super-secret-key-2024-change-in-production"
-SESSION_TYPE = "filesystem"
-SESSION_FILE_DIR = SESSION_DIR
-CORS_ORIGINS = ["http://localhost:5173", "http://127.0.0.1:5173", "http://localhost:5174", "http://127.0.0.1:5174"]
-BACKEND_PORT = 5001
+    # ── Banking Rules ──────────────────────────────────────────────────────────
+    MIN_AGE: int = 18
+    MIN_BALANCE_SAVINGS: float = 1000.0
+    MIN_BALANCE_CURRENT: float = 5000.0
+    DAILY_WITHDRAWAL_LIMIT: float = 50000.0
+    MAX_FAILED_ATTEMPTS: int = 3
+
+    # ── CORS ───────────────────────────────────────────────────────────────────
+    CORS_ORIGINS: List[str] = [
+        "http://localhost:5173",
+        "http://localhost:3000",
+        "http://localhost:80",
+        "http://127.0.0.1:5173",
+    ]
+
+    # ── App ────────────────────────────────────────────────────────────────────
+    APP_NAME: str = "Global Digital Bank"
+    APP_ENV: str = "development"
+    DEBUG: bool = True
+    BACKEND_PORT: int = 8000
+
+    # ── AI Integration ─────────────────────────────────────────────────────────
+    GEMINI_API_KEY: str = ""
+
+    @field_validator("CORS_ORIGINS", mode="before")
+    @classmethod
+    def parse_cors(cls, v):
+        if isinstance(v, str):
+            import json
+            return json.loads(v)
+        return v
+
+
+settings = Settings()

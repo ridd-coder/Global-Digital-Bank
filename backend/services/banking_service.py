@@ -1,129 +1,106 @@
 """
-BankingService — Core banking operations for Global Digital Bank
+BankingService — Core banking operations (migrated from existing Flask/CSV banking_service.py)
+All business logic preserved: daily limits, min balance, PIN verification, lockout, etc.
+Now operates on SQLAlchemy ORM instead of CSV FileManager.
 """
+from datetime import date, datetime, timezone
+from typing import Optional
 
-import uuid
-from datetime import date, datetime
-from typing import List, Optional, Dict
+from passlib.context import CryptContext
+from sqlalchemy.orm import Session
 
-import config
+from config import settings
 from models.account import Account
 from models.transaction import Transaction
-from services.file_manager import FileManager
-from utils.password_utils import PasswordUtils
+from models.beneficiary import Beneficiary
+from models.audit_log import AuditLog
+from models.notification import Notification
+
+pwd_ctx = CryptContext(schemes=["bcrypt"], deprecated="auto")
 
 
 class BankingError(Exception):
-    """Raised for business rule violations."""
     pass
 
 
 class BankingService:
 
-    def __init__(self, file_manager: FileManager):
-        self.fm = file_manager
-        self.pw = PasswordUtils()
+    def __init__(self, db: Session):
+        self.db = db
 
-    # ── Helpers ────────────────────────────────────────────────────────────────
+    # ── PIN verification ───────────────────────────────────────────────────────
 
-    def _new_txn_id(self) -> str:
-        return str(uuid.uuid4())[:8].upper()
+    def _verify_pin(self, pin: str, pin_hash: str) -> bool:
+        try:
+            return pwd_ctx.verify(pin, pin_hash)
+        except Exception:
+            return False
 
-    def _log(self, account_number: int, operation: str, amount: float,
-              balance_after: float, note: str = ""):
-        txn = Transaction(
-            transaction_id=self._new_txn_id(),
-            account_number=account_number,
-            operation=operation,
-            amount=amount,
-            balance_after=balance_after,
-            timestamp=datetime.now().isoformat(),
-            note=note,
-        )
-        self.fm.append_transaction(txn)
-        return txn
+    # ── Daily withdrawal reset (migrated from existing logic) ──────────────────
 
     def _reset_daily_if_needed(self, account: Account) -> Account:
-        today = date.today().isoformat()
+        today = date.today()
         if account.last_withdrawal_date != today:
             account.daily_withdrawn = 0.0
             account.last_withdrawal_date = today
         return account
 
+    # ── Min balance helper ─────────────────────────────────────────────────────
+
     def _get_min_balance(self, account_type: str) -> float:
         return (
-            config.MIN_BALANCE_SAVINGS
-            if account_type.lower() == "savings"
-            else config.MIN_BALANCE_CURRENT
+            settings.MIN_BALANCE_SAVINGS
+            if account_type == "savings"
+            else settings.MIN_BALANCE_CURRENT
         )
 
-    # ── Create Account ─────────────────────────────────────────────────────────
+    # ── Get account (ownership-checked) ───────────────────────────────────────
 
-    def create_account(self, name: str, age: int, account_type: str,
-                       initial_deposit: float, pin: str) -> Account:
-        # Validations
-        name = name.strip()
-        if not name:
-            raise BankingError("Name cannot be empty.")
-        if age < config.MIN_AGE:
-            raise BankingError(f"Minimum age to open an account is {config.MIN_AGE}.")
-        if account_type not in config.ACCOUNT_TYPES:
-            raise BankingError(f"Account type must be one of: {', '.join(config.ACCOUNT_TYPES)}.")
-        min_bal = self._get_min_balance(account_type)
-        if initial_deposit < min_bal:
-            raise BankingError(
-                f"Initial deposit for a {account_type} account must be at least ₹{min_bal:,.2f}."
-            )
-        pin = str(pin).strip()
-        if not pin.isdigit() or len(pin) != 4:
-            raise BankingError("PIN must be exactly 4 digits.")
-
-        account_number = self.fm.get_next_account_number()
-        pin_hash = self.pw.hash_pin(pin)
-
-        account = Account(
-            account_number=account_number,
-            name=name,
-            age=age,
-            account_type=account_type,
-            balance=initial_deposit,
-            pin_hash=pin_hash,
-        )
-        self.fm.add_account(account)
-        self.fm.increment_counter()
-        self._log(account_number, "create", initial_deposit, initial_deposit,
-                  f"Account created — {account_type}")
+    def get_account(self, account_id: str, user_id: str) -> Account:
+        account = self.db.query(Account).filter(
+            Account.id == account_id,
+            Account.user_id == user_id,
+        ).first()
+        if not account:
+            raise BankingError("Account not found or access denied.")
         return account
+
+    def get_account_by_number(self, account_number: str) -> Optional[Account]:
+        return self.db.query(Account).filter(Account.account_number == account_number).first()
+
+    def get_user_accounts(self, user_id: str) -> list[Account]:
+        return self.db.query(Account).filter(Account.user_id == user_id).all()
 
     # ── Deposit ────────────────────────────────────────────────────────────────
 
-    def deposit(self, account_number: int, amount: float) -> Account:
+    def deposit(self, account_id: str, user_id: str, amount: float) -> dict:
         if amount <= 0:
             raise BankingError("Deposit amount must be positive.")
-        account = self.fm.find_account(account_number)
-        if not account:
-            raise BankingError("Account not found.")
+        account = self.get_account(account_id, user_id)
         if not account.is_active():
-            raise BankingError("Account is inactive. Reopen to perform transactions.")
+            raise BankingError("Account is inactive. Please contact support.")
+        if account.is_locked:
+            raise BankingError("Account is locked. Contact support to unlock.")
+
         account.balance += amount
-        self.fm.update_account(account)
-        self._log(account_number, "deposit", amount, account.balance)
-        return account
+        txn = self._log(account, "deposit", amount, f"Deposit of ₹{amount:,.2f}", "completed")
+        self._notify(account.user_id, "Deposit Successful",
+                     f"₹{amount:,.2f} has been deposited to your account ****{account.account_number[-4:]}.")
+        self.db.commit()
+        return {"account": account.to_dict(), "transaction": txn.to_dict()}
 
     # ── Withdraw ───────────────────────────────────────────────────────────────
 
-    def withdraw(self, account_number: int, amount: float, pin: str) -> Account:
+    def withdraw(self, account_id: str, user_id: str, amount: float, pin: str) -> dict:
         if amount <= 0:
             raise BankingError("Withdrawal amount must be positive.")
-        account = self.fm.find_account(account_number)
-        if not account:
-            raise BankingError("Account not found.")
+        account = self.get_account(account_id, user_id)
         if account.is_locked:
-            raise BankingError("Account is locked. Contact admin to unlock.")
+            raise BankingError("Account is locked. Contact support to unlock.")
         if not account.is_active():
             raise BankingError("Account is inactive.")
-        if not self.pw.verify_pin(pin, account.pin_hash):
-            raise BankingError("Incorrect PIN.")
+        if not self._verify_pin(pin, account.pin_hash):
+            raise BankingError("Incorrect transaction PIN.")
 
         account = self._reset_daily_if_needed(account)
         min_bal = self._get_min_balance(account.account_type)
@@ -131,7 +108,7 @@ class BankingService:
             raise BankingError(
                 f"Insufficient balance. Minimum required balance: ₹{min_bal:,.2f}."
             )
-        remaining_daily = config.DAILY_WITHDRAWAL_LIMIT - account.daily_withdrawn
+        remaining_daily = settings.DAILY_WITHDRAWAL_LIMIT - account.daily_withdrawn
         if amount > remaining_daily:
             raise BankingError(
                 f"Daily withdrawal limit exceeded. You can withdraw up to ₹{remaining_daily:,.2f} today."
@@ -139,238 +116,298 @@ class BankingService:
 
         account.balance -= amount
         account.daily_withdrawn += amount
-        self.fm.update_account(account)
-        self._log(account_number, "withdraw", amount, account.balance)
-        return account
+        txn = self._log(account, "withdrawal", amount, f"Withdrawal of ₹{amount:,.2f}", "completed")
+        self._notify(account.user_id, "Withdrawal Successful",
+                     f"₹{amount:,.2f} has been withdrawn from your account ****{account.account_number[-4:]}.")
+        self.db.commit()
+        return {"account": account.to_dict(), "transaction": txn.to_dict()}
 
     # ── Transfer ───────────────────────────────────────────────────────────────
 
-    def transfer(self, sender_number: int, receiver_number: int,
-                 amount: float, pin: str) -> Dict:
-        if sender_number == receiver_number:
-            raise BankingError("Sender and receiver cannot be the same account.")
+    def transfer(
+        self,
+        from_account: Account,
+        to_account_number: str,
+        amount: float,
+        pin: str,
+        description: str = "",
+        beneficiary_id: Optional[str] = None,
+        risk_score: int = 0,
+        risk_level: str = "low",
+        status: str = "completed",
+    ) -> dict:
         if amount <= 0:
             raise BankingError("Transfer amount must be positive.")
+        if from_account.account_number == to_account_number:
+            raise BankingError("Cannot transfer to the same account.")
+        if from_account.is_locked:
+            raise BankingError("Your account is locked. Contact support.")
+        if not from_account.is_active():
+            raise BankingError("Your account is inactive.")
+        if not self._verify_pin(pin, from_account.pin_hash):
+            raise BankingError("Incorrect transaction PIN.")
 
-        sender = self.fm.find_account(sender_number)
-        receiver = self.fm.find_account(receiver_number)
-        if not sender:
-            raise BankingError("Sender account not found.")
-        if not receiver:
-            raise BankingError("Receiver account not found.")
-        if sender.is_locked:
-            raise BankingError("Sender account is locked. Contact admin.")
-        if not sender.is_active():
-            raise BankingError("Sender account is inactive.")
-        if not receiver.is_active():
-            raise BankingError("Receiver account is inactive.")
-        if not self.pw.verify_pin(pin, sender.pin_hash):
-            raise BankingError("Incorrect PIN for sender account.")
+        to_account = self.get_account_by_number(to_account_number)
+        if to_account and not to_account.is_active():
+            raise BankingError("Recipient account is inactive.")
 
-        sender = self._reset_daily_if_needed(sender)
-        min_bal = self._get_min_balance(sender.account_type)
-        if sender.balance - amount < min_bal:
-            raise BankingError(
-                f"Insufficient balance. Minimum required: ₹{min_bal:,.2f}."
-            )
-        remaining_daily = config.DAILY_WITHDRAWAL_LIMIT - sender.daily_withdrawn
+        from_account = self._reset_daily_if_needed(from_account)
+        min_bal = self._get_min_balance(from_account.account_type)
+        if from_account.balance - amount < min_bal:
+            raise BankingError(f"Insufficient balance. Minimum required: ₹{min_bal:,.2f}.")
+        remaining_daily = settings.DAILY_WITHDRAWAL_LIMIT - from_account.daily_withdrawn
         if amount > remaining_daily:
-            raise BankingError(
-                f"Daily limit exceeded. Remaining today: ₹{remaining_daily:,.2f}."
+            raise BankingError(f"Daily limit exceeded. Remaining today: ₹{remaining_daily:,.2f}.")
+
+        from_account.balance -= amount
+        from_account.daily_withdrawn += amount
+
+        # Credit receiver only if not blocked and receiver is internal
+        if status != "blocked" and to_account:
+            to_account.balance += amount
+
+        desc_out = description or f"Transfer to {to_account_number}"
+        desc_in = description or f"Transfer from ****{from_account.account_number[-4:]}"
+
+        txn_out = self._log(
+            from_account, "transfer_out", amount, desc_out, status,
+            counterparty_account_number=to_account_number,
+            counterparty_name=to_account.user.full_name if (to_account and to_account.user) else "External Account",
+            beneficiary_id=beneficiary_id,
+            risk_score=risk_score,
+            risk_level=risk_level,
+        )
+        if status != "blocked" and to_account:
+            self._log(
+                to_account, "transfer_in", amount, desc_in, "completed",
+                counterparty_account_number=from_account.account_number,
             )
 
-        sender.balance -= amount
-        sender.daily_withdrawn += amount
-        receiver.balance += amount
+        self.db.flush()
+        return {
+            "from_account": from_account.to_dict(),
+            "to_account": to_account.to_dict() if to_account else None,
+            "transaction": txn_out.to_dict(),
+            "transaction_id": txn_out.id,
+        }
 
-        self.fm.update_account(sender)
-        self.fm.update_account(receiver)
+    # ── Withdrawal limit info ──────────────────────────────────────────────────
 
-        note = f"Transfer to {receiver_number}"
-        self._log(sender_number, "transfer_out", amount, sender.balance, note)
-        note2 = f"Transfer from {sender_number}"
-        self._log(receiver_number, "transfer_in", amount, receiver.balance, note2)
-
-        return {"sender": sender, "receiver": receiver}
-
-    # ── Balance / Account Info ─────────────────────────────────────────────────
-
-    def get_balance(self, account_number: int) -> float:
-        account = self.fm.find_account(account_number)
-        if not account:
-            raise BankingError("Account not found.")
-        return account.balance
+    def get_withdrawal_limit_info(self, account_id: str, user_id: str) -> dict:
+        account = self.get_account(account_id, user_id)
+        account = self._reset_daily_if_needed(account)
+        return {
+            "limit": settings.DAILY_WITHDRAWAL_LIMIT,
+            "used": round(account.daily_withdrawn, 2),
+            "remaining": round(settings.DAILY_WITHDRAWAL_LIMIT - account.daily_withdrawn, 2),
+        }
 
     # ── Close / Reopen ─────────────────────────────────────────────────────────
 
-    def close_account(self, account_number: int, pin: str) -> Account:
-        account = self.fm.find_account(account_number)
-        if not account:
-            raise BankingError("Account not found.")
+    def close_account(self, account_id: str, user_id: str, pin: str) -> Account:
+        account = self.get_account(account_id, user_id)
         if account.is_locked:
-            raise BankingError("Account is locked. Contact admin.")
-        if not self.pw.verify_pin(pin, account.pin_hash):
+            raise BankingError("Account is locked. Contact support.")
+        if not self._verify_pin(pin, account.pin_hash):
             raise BankingError("Incorrect PIN.")
         if account.status == "inactive":
             raise BankingError("Account is already closed.")
         account.status = "inactive"
-        self.fm.update_account(account)
-        self._log(account_number, "close", 0.0, account.balance)
+        self._log(account, "account_close", 0.0, "Account closed", "completed")
+        self.db.commit()
         return account
 
-    def reopen_account(self, account_number: int, pin: str) -> Account:
-        account = self.fm.find_account(account_number)
-        if not account:
-            raise BankingError("Account not found.")
-        if not self.pw.verify_pin(pin, account.pin_hash):
+    def reopen_account(self, account_id: str, user_id: str, pin: str) -> Account:
+        account = self.get_account(account_id, user_id)
+        if not self._verify_pin(pin, account.pin_hash):
             raise BankingError("Incorrect PIN.")
         if account.status == "active":
             raise BankingError("Account is already active.")
         account.status = "active"
-        self.fm.update_account(account)
-        self._log(account_number, "reopen", 0.0, account.balance)
+        self._log(account, "account_open", 0.0, "Account reopened", "completed")
+        self.db.commit()
         return account
 
-    # ── Rename ─────────────────────────────────────────────────────────────────
+    # ── Beneficiary management ─────────────────────────────────────────────────
 
-    def rename_account(self, account_number: int, new_name: str, pin: str) -> Account:
-        new_name = new_name.strip()
-        if not new_name:
-            raise BankingError("Name cannot be empty.")
-        account = self.fm.find_account(account_number)
-        if not account:
-            raise BankingError("Account not found.")
-        if account.is_locked:
-            raise BankingError("Account is locked. Contact admin.")
-        if not self.pw.verify_pin(pin, account.pin_hash):
-            raise BankingError("Incorrect PIN.")
-        old_name = account.name
-        account.name = new_name
-        self.fm.update_account(account)
-        self._log(account_number, "rename", 0.0, account.balance,
-                  f"Renamed from '{old_name}' to '{new_name}'")
-        return account
+    def add_beneficiary(self, account_id: str, user_id: str, name: str,
+                        account_number: str, bank_name: str = "Global Digital Bank") -> Beneficiary:
+        account = self.get_account(account_id, user_id)
+        # Check duplicate
+        existing = self.db.query(Beneficiary).filter(
+            Beneficiary.account_id == account_id,
+            Beneficiary.account_number == account_number,
+            Beneficiary.is_active == True,
+        ).first()
+        if existing:
+            raise BankingError("This beneficiary already exists.")
+        if account_number == account.account_number:
+            raise BankingError("Cannot add your own account as a beneficiary.")
 
-    # ── Simple Interest ────────────────────────────────────────────────────────
+        ben = Beneficiary(account_id=account_id, name=name, account_number=account_number, bank_name=bank_name)
+        self.db.add(ben)
+        self._notify(user_id, "Beneficiary Added",
+                     f"New beneficiary '{name}' (****{account_number[-4:]}) has been added.")
+        self.db.commit()
+        return ben
 
-    def calculate_simple_interest(self, account_number: int,
-                                  rate: float, years: float) -> Dict:
-        if rate <= 0 or rate > 100:
-            raise BankingError("Interest rate must be between 0 and 100.")
-        if years <= 0:
-            raise BankingError("Number of years must be positive.")
-        account = self.fm.find_account(account_number)
-        if not account:
-            raise BankingError("Account not found.")
-        principal = account.balance
-        si = (principal * rate * years) / 100.0
+    def get_beneficiaries(self, account_id: str, user_id: str) -> list[Beneficiary]:
+        self.get_account(account_id, user_id)  # ownership check
+        return self.db.query(Beneficiary).filter(
+            Beneficiary.account_id == account_id,
+            Beneficiary.is_active == True,
+        ).all()
+
+    def delete_beneficiary(self, beneficiary_id: str, account_id: str, user_id: str) -> None:
+        self.get_account(account_id, user_id)  # ownership check
+        ben = self.db.query(Beneficiary).filter(
+            Beneficiary.id == beneficiary_id,
+            Beneficiary.account_id == account_id,
+        ).first()
+        if not ben:
+            raise BankingError("Beneficiary not found.")
+        ben.is_active = False
+        self.db.commit()
+
+    # ── Transaction history ────────────────────────────────────────────────────
+
+    def get_transactions(self, account_id: str, user_id: str,
+                         page: int = 1, per_page: int = 20,
+                         txn_type: str = "all", status: str = "all") -> dict:
+        self.get_account(account_id, user_id)  # ownership check
+        q = self.db.query(Transaction).filter(Transaction.account_id == account_id)
+        if txn_type != "all":
+            q = q.filter(Transaction.type == txn_type)
+        if status != "all":
+            q = q.filter(Transaction.status == status)
+        total = q.count()
+        txns = q.order_by(Transaction.created_at.desc()).offset((page - 1) * per_page).limit(per_page).all()
         return {
-            "principal": round(principal, 2),
-            "rate": rate,
-            "years": years,
-            "simple_interest": round(si, 2),
-            "final_amount": round(principal + si, 2),
+            "transactions": [t.to_dict() for t in txns],
+            "total": total,
+            "page": page,
+            "per_page": per_page,
+            "pages": (total + per_page - 1) // per_page,
         }
 
-    # ── Transaction History ────────────────────────────────────────────────────
-
-    def get_transactions(self, account_number: int) -> List[Transaction]:
-        account = self.fm.find_account(account_number)
+    def get_transaction_detail(self, txn_id: str, user_id: str) -> Transaction:
+        txn = self.db.query(Transaction).filter(Transaction.id == txn_id).first()
+        if not txn:
+            raise BankingError("Transaction not found.")
+        # Ownership check via account
+        account = self.db.query(Account).filter(
+            Account.id == txn.account_id, Account.user_id == user_id
+        ).first()
         if not account:
-            raise BankingError("Account not found.")
-        txns = self.fm.get_account_transactions(account_number)
-        return sorted(txns, key=lambda t: t.timestamp, reverse=True)
+            raise BankingError("Access denied.")
+        return txn
 
-    # ── Admin Operations ───────────────────────────────────────────────────────
+    # ── Analytics ─────────────────────────────────────────────────────────────
 
-    def get_all_accounts(self) -> List[Account]:
-        return self.fm.load_accounts()
-
-    def get_active_accounts(self) -> List[Account]:
-        return [a for a in self.fm.load_accounts() if a.is_active()]
-
-    def get_inactive_accounts(self) -> List[Account]:
-        return [a for a in self.fm.load_accounts() if not a.is_active()]
-
-    def search_accounts(self, query: str) -> List[Account]:
-        q = query.strip().lower()
-        results = []
-        for acc in self.fm.load_accounts():
-            if (q in acc.name.lower() or
-                    q in str(acc.account_number)):
-                results.append(acc)
-        return results
-
-    def get_top_accounts(self, n: int = 10) -> List[Account]:
-        accounts = self.fm.load_accounts()
-        return sorted(accounts, key=lambda a: a.balance, reverse=True)[:n]
-
-    def get_youngest_account(self) -> Optional[Account]:
-        accounts = self.fm.load_accounts()
+    def get_analytics(self, user_id: str) -> dict:
+        from sqlalchemy import func, extract
+        accounts = self.get_user_accounts(user_id)
         if not accounts:
-            return None
-        return min(accounts, key=lambda a: a.age)
+            return {}
+        account_ids = [a.id for a in accounts]
 
-    def get_oldest_account(self) -> Optional[Account]:
-        accounts = self.fm.load_accounts()
-        if not accounts:
-            return None
-        return max(accounts, key=lambda a: a.age)
+        # Monthly spending (last 6 months)
+        from datetime import timedelta
+        now = datetime.now(timezone.utc)
+        six_months_ago = now - timedelta(days=180)
 
-    def get_average_balance(self) -> float:
-        accounts = self.fm.load_accounts()
-        if not accounts:
-            return 0.0
-        return sum(a.balance for a in accounts) / len(accounts)
+        txns = self.db.query(Transaction).filter(
+            Transaction.account_id.in_(account_ids),
+            Transaction.created_at >= six_months_ago,
+            Transaction.status == "completed",
+        ).all()
 
-    def get_report(self) -> Dict:
-        accounts = self.fm.load_accounts()
-        active = [a for a in accounts if a.is_active()]
-        inactive = [a for a in accounts if not a.is_active()]
-        locked = [a for a in accounts if a.is_locked]
+        monthly_data: dict = {}
+        category_totals: dict = {
+            "Food & Groceries": 0, "Utilities": 0, "Transfer": 0,
+            "Salary": 0, "Shopping": 0, "Other": 0,
+        }
+
+        for t in txns:
+            month_key = t.created_at.strftime("%Y-%m")
+            if month_key not in monthly_data:
+                monthly_data[month_key] = {"income": 0.0, "expense": 0.0}
+            if t.type in ("deposit", "transfer_in", "interest"):
+                monthly_data[month_key]["income"] += t.amount
+            else:
+                monthly_data[month_key]["expense"] += t.amount
+            # Category from description
+            desc = (t.description or "").lower()
+            if any(k in desc for k in ["grocer", "food", "restaurant", "swiggy", "zomato"]):
+                category_totals["Food & Groceries"] += t.amount
+            elif any(k in desc for k in ["electric", "gas", "water", "bill", "utility"]):
+                category_totals["Utilities"] += t.amount
+            elif any(k in desc for k in ["transfer"]):
+                category_totals["Transfer"] += t.amount
+            elif any(k in desc for k in ["salary", "income", "payroll"]):
+                category_totals["Salary"] += t.amount
+            elif any(k in desc for k in ["amazon", "flipkart", "shop", "purchase", "myntra"]):
+                category_totals["Shopping"] += t.amount
+
         total_balance = sum(a.balance for a in accounts)
-        avg_balance = total_balance / len(accounts) if accounts else 0.0
-        youngest = min(accounts, key=lambda a: a.age) if accounts else None
-        oldest = max(accounts, key=lambda a: a.age) if accounts else None
+        all_amounts = [t.amount for t in txns if t.type not in ("deposit", "transfer_in", "interest")]
+
         return {
-            "total_accounts": len(accounts),
-            "active_accounts": len(active),
-            "inactive_accounts": len(inactive),
-            "locked_accounts": len(locked),
             "total_balance": round(total_balance, 2),
-            "average_balance": round(avg_balance, 2),
-            "youngest": youngest.to_dict() if youngest else None,
-            "oldest": oldest.to_dict() if oldest else None,
-            "savings_count": len([a for a in accounts if a.account_type == "Savings"]),
-            "current_count": len([a for a in accounts if a.account_type == "Current"]),
+            "monthly_data": [
+                {"month": k, "income": round(v["income"], 2), "expense": round(v["expense"], 2)}
+                for k, v in sorted(monthly_data.items())
+            ],
+            "category_spending": [
+                {"category": k, "amount": round(v, 2)}
+                for k, v in category_totals.items() if v > 0
+            ],
+            "avg_transaction": round(sum(all_amounts) / len(all_amounts), 2) if all_amounts else 0,
+            "largest_transaction": round(max(all_amounts), 2) if all_amounts else 0,
+            "transaction_count": len(txns),
         }
 
-    def unlock_account(self, account_number: int) -> Account:
-        account = self.fm.find_account(account_number)
+    # ── Admin operations ───────────────────────────────────────────────────────
+
+    def unlock_account(self, account_id: str, admin_user_id: str) -> Account:
+        account = self.db.query(Account).filter(Account.id == account_id).first()
         if not account:
             raise BankingError("Account not found.")
         account.is_locked = False
-        account.failed_login_attempts = 0
-        self.fm.update_account(account)
+        # Also unlock the user
+        user = account.user
+        if user:
+            user.is_locked = False
+            user.failed_login_attempts = 0
+            self._notify(user.id, "Account Unlocked",
+                         "Your account has been unlocked by an administrator. You can now log in.")
+        log = AuditLog(
+            user_id=admin_user_id,
+            action="ACCOUNT_UNLOCKED",
+            resource_type="account",
+            resource_id=account_id,
+            details={"account_number": account.account_number},
+        )
+        self.db.add(log)
+        self.db.commit()
         return account
 
-    def get_all_transactions(self) -> List[Transaction]:
-        txns = self.fm.load_transactions()
-        return sorted(txns, key=lambda t: t.timestamp, reverse=True)
+    # ── Private helpers ────────────────────────────────────────────────────────
 
-    # ── Withdrawal limit info ──────────────────────────────────────────────────
+    def _log(self, account: Account, txn_type: str, amount: float, description: str,
+             status: str = "completed", **kwargs) -> Transaction:
+        txn = Transaction(
+            account_id=account.id,
+            type=txn_type,
+            amount=amount,
+            balance_after=account.balance,
+            description=description,
+            status=status,
+            **kwargs,
+        )
+        self.db.add(txn)
+        return txn
 
-    def get_withdrawal_limit_info(self, account_number: int) -> Dict:
-        account = self.fm.find_account(account_number)
-        if not account:
-            raise BankingError("Account not found.")
-        account = self._reset_daily_if_needed(account)
-        self.fm.update_account(account)
-        used = account.daily_withdrawn
-        remaining = config.DAILY_WITHDRAWAL_LIMIT - used
-        return {
-            "limit": config.DAILY_WITHDRAWAL_LIMIT,
-            "used": round(used, 2),
-            "remaining": round(remaining, 2),
-            "reset_daily": True,
-        }
+    def _notify(self, user_id: str, title: str, body: str, ntype: str = "transaction") -> None:
+        n = Notification(user_id=user_id, title=title, body=body, type=ntype)
+        self.db.add(n)

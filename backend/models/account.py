@@ -1,88 +1,82 @@
 """
-Account Model — Global Digital Bank
+Account model — Global Digital Bank
 """
+import uuid
+import random
+from datetime import datetime, timezone, date
+from sqlalchemy import String, Float, Boolean, Integer, DateTime, Date, ForeignKey, Enum as SAEnum
+from sqlalchemy.orm import Mapped, mapped_column, relationship
+from database import Base
 
-from dataclasses import dataclass, field
-from datetime import datetime
-from typing import Optional
+
+def _now():
+    return datetime.now(timezone.utc)
 
 
-@dataclass
-class Account:
-    account_number: int
-    name: str
-    age: int
-    account_type: str          # "Savings" or "Current"
-    balance: float
-    pin_hash: str              # bcrypt hash — never plaintext
-    status: str = "active"    # "active" or "inactive"
-    is_locked: bool = False
-    failed_login_attempts: int = 0
-    daily_withdrawn: float = 0.0
-    last_withdrawal_date: str = ""   # ISO date string YYYY-MM-DD
-    created_at: str = field(default_factory=lambda: datetime.now().isoformat())
+def _generate_account_number() -> str:
+    """Generate a 10-digit account number."""
+    return str(random.randint(1000000000, 9999999999))
 
-    # ── Helpers ────────────────────────────────────────────────────────────────
+
+class Account(Base):
+    __tablename__ = "accounts"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
+    account_number: Mapped[str] = mapped_column(String(20), unique=True, nullable=False, index=True,
+                                                 default=_generate_account_number)
+    user_id: Mapped[str] = mapped_column(String(36), ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True)
+    account_type: Mapped[str] = mapped_column(SAEnum("savings", "current", name="account_type"), nullable=False)
+    balance: Mapped[float] = mapped_column(Float, default=0.0, nullable=False)
+    status: Mapped[str] = mapped_column(SAEnum("active", "inactive", "closed", name="account_status"),
+                                        default="active", nullable=False)
+    pin_hash: Mapped[str] = mapped_column(String(255), nullable=False)  # bcrypt — never plaintext
+
+    # Daily withdrawal tracking (migrated from existing logic)
+    daily_withdrawn: Mapped[float] = mapped_column(Float, default=0.0, nullable=False)
+    last_withdrawal_date: Mapped[date | None] = mapped_column(Date, nullable=True)
+
+    # Security (mirrors user-level lock for account-specific operations)
+    is_locked: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now, nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now, onupdate=_now, nullable=False)
+
+    # Relationships
+    user: Mapped["User"] = relationship("User", back_populates="accounts")
+    transactions: Mapped[list["Transaction"]] = relationship("Transaction", back_populates="account",
+                                                              lazy="select", cascade="all, delete-orphan")
+    beneficiaries: Mapped[list["Beneficiary"]] = relationship("Beneficiary", back_populates="account",
+                                                               foreign_keys="Beneficiary.account_id",
+                                                               lazy="select", cascade="all, delete-orphan")
+    fraud_alerts: Mapped[list["FraudAlert"]] = relationship("FraudAlert", back_populates="account", lazy="select")
+
     def is_active(self) -> bool:
         return self.status == "active"
 
+    def masked_number(self) -> str:
+        """Return masked account number like ****7890."""
+        if len(self.account_number) >= 4:
+            return f"****{self.account_number[-4:]}"
+        return self.account_number
+
+    def reset_daily_if_needed(self):
+        """Reset daily_withdrawn if it's a new day (migrated from existing logic)."""
+        today = date.today()
+        if self.last_withdrawal_date != today:
+            self.daily_withdrawn = 0.0
+            self.last_withdrawal_date = today
+
     def to_dict(self, include_sensitive: bool = False) -> dict:
-        d = {
+        return {
+            "id": self.id,
             "account_number": self.account_number,
-            "name": self.name,
-            "age": self.age,
+            "masked_number": self.masked_number(),
+            "user_id": self.user_id,
             "account_type": self.account_type,
             "balance": round(self.balance, 2),
             "status": self.status,
             "is_locked": self.is_locked,
-            "failed_login_attempts": self.failed_login_attempts,
             "daily_withdrawn": round(self.daily_withdrawn, 2),
-            "last_withdrawal_date": self.last_withdrawal_date,
-            "created_at": self.created_at,
+            "last_withdrawal_date": self.last_withdrawal_date.isoformat() if self.last_withdrawal_date else None,
+            "created_at": self.created_at.isoformat() if self.created_at else None,
         }
-        if include_sensitive:
-            d["pin_hash"] = self.pin_hash
-        return d
-
-    def to_csv_row(self) -> list:
-        """Return ordered list matching CSV header."""
-        return [
-            self.account_number,
-            self.name,
-            self.age,
-            self.account_type,
-            round(self.balance, 2),
-            self.pin_hash,
-            self.status,
-            int(self.is_locked),
-            self.failed_login_attempts,
-            round(self.daily_withdrawn, 2),
-            self.last_withdrawal_date,
-            self.created_at,
-        ]
-
-    @staticmethod
-    def csv_header() -> list:
-        return [
-            "account_number", "name", "age", "account_type",
-            "balance", "pin_hash", "status", "is_locked",
-            "failed_login_attempts", "daily_withdrawn",
-            "last_withdrawal_date", "created_at",
-        ]
-
-    @classmethod
-    def from_csv_row(cls, row: dict) -> "Account":
-        return cls(
-            account_number=int(row["account_number"]),
-            name=row["name"],
-            age=int(row["age"]),
-            account_type=row["account_type"],
-            balance=float(row["balance"]),
-            pin_hash=row["pin_hash"],
-            status=row["status"],
-            is_locked=row["is_locked"] in ("1", "True", "true"),
-            failed_login_attempts=int(row["failed_login_attempts"]),
-            daily_withdrawn=float(row["daily_withdrawn"]),
-            last_withdrawal_date=row["last_withdrawal_date"],
-            created_at=row["created_at"],
-        )

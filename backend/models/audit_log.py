@@ -4,10 +4,13 @@ Every sensitive operation is logged here.
 """
 import uuid
 from datetime import datetime, timezone
-from typing import Optional
+from typing import Optional, TYPE_CHECKING
 from sqlalchemy import String, DateTime, ForeignKey, JSON
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 from database import Base
+
+if TYPE_CHECKING:
+    from models.user import User
 
 
 def _now():
