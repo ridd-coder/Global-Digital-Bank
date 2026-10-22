@@ -69,7 +69,19 @@ app.include_router(admin_dashboard.router)
 app.include_router(admin_fraud.router)
 
 
-# ── Health check ───────────────────────────────────────────────────────────────
+# ── Health & Root check ────────────────────────────────────────────────────────
+@app.get("/")
+def root():
+    return {
+        "status": "ok",
+        "service": "Global Digital Bank API",
+        "version": "2.0.0",
+        "health": "/api/health",
+        "docs": "/api/docs",
+        "frontend": "https://frontend-gray-eight-53.vercel.app",
+    }
+
+
 @app.get("/api/health")
 def health():
     return {
