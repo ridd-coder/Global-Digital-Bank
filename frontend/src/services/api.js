@@ -1,7 +1,16 @@
 import axios from 'axios'
 
+const getApiBaseUrl = () => {
+  const envUrl = import.meta.env.VITE_API_BASE_URL
+  if (!envUrl) return '/api'
+  const trimmed = envUrl.replace(/\/+$/, '')
+  return trimmed.endsWith('/api') ? trimmed : `${trimmed}/api`
+}
+
+const API_BASE_URL = getApiBaseUrl()
+
 const api = axios.create({
-  baseURL: '/api',
+  baseURL: API_BASE_URL,
   headers: { 'Content-Type': 'application/json' },
 })
 
@@ -24,7 +33,7 @@ api.interceptors.response.use(
       const refreshToken = localStorage.getItem('refresh_token')
       if (refreshToken) {
         try {
-          const res = await axios.post('/api/auth/refresh', null, {
+          const res = await axios.post(`${API_BASE_URL}/auth/refresh`, null, {
             headers: { Authorization: `Bearer ${refreshToken}` },
           })
           const newToken = res.data.access_token

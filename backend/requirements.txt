@@ -33,6 +33,10 @@ reportlab==4.2.5
 # Rate limiting
 slowapi==0.1.9
 
+# AI Integration
+google-genai==2.22.0
+
 # Utilities
 python-dateutil==2.9.0
 pytz==2024.2
+
